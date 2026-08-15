@@ -1,67 +1,70 @@
 # Cogrid 本地开发环境
 # 一键拉起：make dev 或 docker-compose up --build
 #
-# 当前为骨架阶段，服务定义待实现后补充实际构建逻辑。
-
-version: "3.9"
+# 启动后：
+#   - 协调器 API: http://localhost:8000
+#   - 仪表盘:     http://localhost:3000
+#   - API 文档:   http://localhost:8000/docs
 
 services:
-  # 协调器
+  # 协调器 — 系统中枢
   coordinator:
     build:
       context: .
       dockerfile: Dockerfile.coordinator
     ports:
-      - "8000:8000"   # REST API
-      - "50051:50051" # gRPC
+      - "8000:8000"
     environment:
       - COGRID_DB_PATH=/data/cogrid.db
-      - COGRID_LOG_LEVEL=debug
+      - COGRID_LOG_LEVEL=info
     volumes:
       - coordinator-data:/data
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/v1/health')"]
       interval: 10s
       timeout: 5s
       retries: 3
+    restart: unless-stopped
 
-  # 模拟贡献者节点 1
+  # 贡献者节点 1 — 保守模式
   agent-1:
     build:
       context: .
       dockerfile: Dockerfile.agent
     environment:
-      - COGRID_COORDINATOR=coordinator:50051
+      - COGRID_COORDINATOR_URL=http://coordinator:8000/api/v1
       - COGRID_NODE_NAME=agent-1
-      - COGRID_INTENSITY=balanced
-    depends_on:
-      coordinator:
-        condition: service_healthy
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-
-  # 模拟贡献者节点 2
-  agent-2:
-    build:
-      context: .
-      dockerfile: Dockerfile.agent
-    environment:
-      - COGRID_COORDINATOR=coordinator:50051
-      - COGRID_NODE_NAME=agent-2
       - COGRID_INTENSITY=conservative
     depends_on:
       coordinator:
         condition: service_healthy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
 
-  # 模拟贡献者节点 3
+  # 贡献者节点 2 — 均衡模式
+  agent-2:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    environment:
+      - COGRID_COORDINATOR_URL=http://coordinator:8000/api/v1
+      - COGRID_NODE_NAME=agent-2
+      - COGRID_INTENSITY=balanced
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  # 贡献者节点 3 — 激进模式
   agent-3:
     build:
       context: .
       dockerfile: Dockerfile.agent
     environment:
-      - COGRID_COORDINATOR=coordinator:50051
+      - COGRID_COORDINATOR_URL=http://coordinator:8000/api/v1
       - COGRID_NODE_NAME=agent-3
       - COGRID_INTENSITY=aggressive
     depends_on:
@@ -69,6 +72,7 @@ services:
         condition: service_healthy
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
 
   # Web 仪表盘
   dashboard:
@@ -76,12 +80,11 @@ services:
       context: ./dashboard
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
-    environment:
-      - VITE_API_URL=http://localhost:8000
+      - "3000:80"
     depends_on:
       coordinator:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   coordinator-data:

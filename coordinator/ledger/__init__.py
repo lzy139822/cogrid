@@ -16,12 +16,16 @@ TODO(ledger): 考虑加入消费扣减机制，当前只有贡献累积。
 
 from __future__ import annotations
 
-import time
+import asyncio
 import logging
-from typing import Dict, Optional
+import time
+from typing import TYPE_CHECKING, Dict, Optional
 
-from coordinator.models.node import Node, NodeStatus
 from coordinator.models.contribution import ContributionRecord
+from coordinator.models.node import Node
+
+if TYPE_CHECKING:
+    from coordinator.storage import Storage
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +35,43 @@ class Ledger:
 
     线程安全：所有方法通过 asyncio.Lock 保护（在 async 上下文中使用）。
     对于点火阶段，使用简单内存存储 + SQLite 持久化。
+
+    持久化：构造函数接收可选的 Storage 实例。传入后，所有写操作
+    （record_probe、settle_online_credits 等）会异步保存到 SQLite；
+    不传入时退化为纯内存模式，确保单元测试与轻量场景不受影响。
     """
 
-    def __init__(self) -> None:
+    def __init__(self, storage: "Optional[Storage]" = None) -> None:
         self._records: Dict[str, ContributionRecord] = {}
         self._last_settle: Dict[str, float] = {}  # node_id -> last settle timestamp
+        self._storage = storage
+
+    def _persist(self, node_id: str) -> None:
+        """将单个节点的贡献记录异步写入 SQLite（fire-and-forget）。
+
+        - 未注入 Storage 时直接返回（纯内存模式）。
+        - 在没有运行中事件循环时（如同步单元测试）安全跳过。
+        """
+        if self._storage is None:
+            return
+        rec = self._records.get(node_id)
+        if rec is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # 没有运行中的事件循环，跳过异步持久化
+            return
+        task = loop.create_task(self._storage.save_contribution(rec))
+
+        def _on_done(t: "asyncio.Future") -> None:
+            if t.cancelled():
+                return
+            exc = t.exception()
+            if exc is not None:
+                logger.warning(f"持久化贡献记录失败 (node={node_id}): {exc}")
+
+        task.add_done_callback(_on_done)
 
     def get_or_create(self, node_id: str) -> ContributionRecord:
         """获取或创建节点的贡献记录。"""
@@ -49,6 +85,7 @@ class Ledger:
         rec = self.get_or_create(node_id)
         rec.record_probe(success)
         logger.debug(f"Probe recorded for {node_id}: success={success}, rate={rec.probe_success_rate:.2%}")
+        self._persist(node_id)
 
     def settle_online_credits(self, node: Node) -> float:
         """结算节点在线期间累积的贡献分。
@@ -77,6 +114,7 @@ class Ledger:
         credits = resource_weight * elapsed * rec.probe_success_rate * rec.quality_factor
         rec.add_credits(credits)
         rec.accumulate_online(elapsed)
+        rec.last_credit_time = now
         self._last_settle[node.node_id] = now
 
         logger.debug(
@@ -84,6 +122,8 @@ class Ledger:
             f"(resource={resource_weight:.1f}, elapsed={elapsed:.0f}s, "
             f"probe_rate={rec.probe_success_rate:.2%}, quality={rec.quality_factor:.2f})"
         )
+        # add_credits / accumulate_online 已修改记录，异步持久化
+        self._persist(node.node_id)
         return credits
 
     def get_credits(self, node_id: str) -> float:
@@ -133,3 +173,30 @@ class Ledger:
     def all_records(self) -> Dict[str, ContributionRecord]:
         """返回所有记录（用于持久化）。"""
         return dict(self._records)
+
+    async def load_from_storage(self) -> None:
+        """启动时从 SQLite 加载历史贡献记录，恢复内存状态。
+
+        - 未注入 Storage 时为空操作。
+        - 加载后会重置 _last_settle 为当前时间，避免重启后一次性
+          结算过长的"离线时长"导致贡献分异常膨胀。
+        """
+        if self._storage is None:
+            return
+        records = await self._storage.load_contributions()
+        now = time.time()
+        for r in records:
+            node_id = r["node_id"]
+            rec = ContributionRecord(
+                node_id=node_id,
+                total_credits=r["total_credits"],
+                probe_success_count=r["probe_success_count"],
+                probe_total_count=r["probe_total_count"],
+                quality_factor=r["quality_factor"],
+                online_seconds=r["online_seconds"],
+                last_credit_time=r["last_credit_time"],
+            )
+            self._records[node_id] = rec
+            # 重置结算基线为当前时间，避免重启后补结过长时间段
+            self._last_settle[node_id] = now
+        logger.info(f"从存储加载了 {len(records)} 条贡献记录")

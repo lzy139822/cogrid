@@ -9,18 +9,20 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from coordinator.queue import TaskQueue
-from coordinator.ledger import Ledger
-from coordinator.scheduler import Scheduler
-from coordinator.prober import Prober
-from coordinator.filler import Filler
 from coordinator.api import router
+from coordinator.filler import Filler
+from coordinator.ledger import Ledger
+from coordinator.prober import Prober
+from coordinator.queue import TaskQueue
+from coordinator.scheduler import Scheduler
+from coordinator.storage import Storage
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,12 +37,25 @@ async def lifespan(app: FastAPI):
     """应用生命周期：启动后台任务。"""
     logger.info("Cogrid 协调器启动中...")
 
-    # 初始化核心组件
-    queue = TaskQueue()
-    ledger = Ledger()
+    # 初始化 SQLite 持久化存储（路径可通过环境变量覆盖）
+    db_path = os.environ.get("COGRID_DB_PATH", "data/cogrid.db")
+    storage = Storage(db_path)
+    await storage.init()
+
+    # 初始化核心组件，注入 Storage 实现持久化
+    queue = TaskQueue(storage)
+    ledger = Ledger(storage)
     scheduler = Scheduler(queue, ledger)
     prober = Prober(queue, ledger)
     filler = Filler(queue, scheduler)
+
+    # 从存储恢复历史状态（贡献记录、未完成任务）
+    try:
+        await ledger.load_from_storage()
+        await queue.load_from_storage()
+    except Exception:
+        # 恢复失败不应阻止启动，以空状态继续
+        logger.exception("从存储恢复状态失败，将以空状态启动")
 
     # 注入到 API router
     router.state = {
@@ -49,12 +64,14 @@ async def lifespan(app: FastAPI):
         "scheduler": scheduler,
         "prober": prober,
         "filler": filler,
+        "storage": storage,
     }
     app.state.scheduler = scheduler
     app.state.queue = queue
     app.state.ledger = ledger
     app.state.prober = prober
     app.state.filler = filler
+    app.state.storage = storage
 
     # 启动后台循环
     bg_task = asyncio.create_task(background_loop(scheduler, queue, prober, filler))
@@ -62,8 +79,9 @@ async def lifespan(app: FastAPI):
     logger.info("Cogrid 协调器就绪 — 等待节点连接")
     yield
 
-    # 关闭
+    # 关闭：取消后台循环并关闭存储
     bg_task.cancel()
+    await storage.close()
     logger.info("Cogrid 协调器已关闭")
 
 

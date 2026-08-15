@@ -48,6 +48,10 @@ class TaskAssignment:
     timeout_seconds: int = 3600
     task_type: str = "user_task"  # user_task / probe / filler
     preemptible: bool = True
+    # 是否支持 checkpoint（抢占时可保存进度）
+    can_checkpoint: bool = False
+    # 已有的 checkpoint 数据（重新调度时用于续跑）
+    checkpoint_data: str = ""
 
     @classmethod
     def from_dict(cls, data: dict) -> "TaskAssignment":
@@ -62,6 +66,8 @@ class TaskAssignment:
             timeout_seconds=data.get("timeout_seconds", 3600),
             task_type=data.get("task_type", "user_task"),
             preemptible=data.get("preemptible", True),
+            can_checkpoint=data.get("can_checkpoint", False),
+            checkpoint_data=data.get("checkpoint_data", ""),
         )
 
 
@@ -75,6 +81,7 @@ async def register(
     node_name: str,
     resources: Optional[SystemResources] = None,
     intensity: IntensityLevel = IntensityLevel.BALANCED,
+    owner_user_id: str = "",
 ) -> str:
     """注册节点到协调器。
 
@@ -83,6 +90,7 @@ async def register(
         node_name:       节点名称
         resources:       物理资源总量；为 None 时自动检测
         intensity:       初始强度档位
+        owner_user_id:   节点归属用户 ID（用于抢占回收鉴权）
 
     Returns:
         协调器分配的 node_id
@@ -104,6 +112,7 @@ async def register(
         "gpu_count": resources.gpu_count_total,
         "memory_mb": resources.memory_mb_total,
         "intensity": intensity.value,
+        "owner_user_id": owner_user_id,
     }
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
@@ -176,6 +185,7 @@ async def report_result(
     stderr: str,
     duration: float,
     artifact_path: str = "",
+    checkpoint_data: str = "",
 ) -> None:
     """上报任务执行结果。
 
@@ -188,6 +198,7 @@ async def report_result(
         stderr:          标准错误
         duration:        执行时长（秒）
         artifact_path:   产物路径（填充任务）
+        checkpoint_data: 任务被抢占时保存的进度快照，用于续跑
     """
     base = _normalize_url(coordinator_url)
     payload = {
@@ -199,6 +210,7 @@ async def report_result(
         "stderr": stderr[:MAX_OUTPUT_CHARS],
         "duration_seconds": round(duration, 3),
         "artifact_path": artifact_path,
+        "checkpoint_data": checkpoint_data[:MAX_OUTPUT_CHARS],
     }
 
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:

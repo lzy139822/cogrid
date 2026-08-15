@@ -8,11 +8,18 @@ busybox echo / sleep 等探针和填充任务。
     无 Docker 环境下，command 列表被直接交给 subprocess.Popen 执行。
     这对探针任务（如 ["echo", "hello"]、["sleep", "3"]）和
     填充任务的冒烟测试足够。
+
+Checkpoint 支持：
+    支持 checkpoint 的任务在被抢占/超时时，执行器会尝试从约定的
+    checkpoint 文件路径（CHECKPOINT_PATH）读取任务保存的进度快照，
+    并通过 TaskResult.checkpoint_data 回传给协调器，以便重新调度时续跑。
+    优雅停止：先发 SIGTERM 等待 PREEMPT_GRACE_SECONDS，再强制 SIGKILL。
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import time
 from dataclasses import dataclass
@@ -21,6 +28,14 @@ from typing import Any, Optional
 from agent.reporter import TaskAssignment
 
 logger = logging.getLogger("cogrid.agent.executor")
+
+# 优雅抢占的宽限时间（秒）。与 coordinator.scheduler.PREEMPT_GRACE_SECONDS 保持一致。
+# 任务收到停止信号后有这段时间保存 checkpoint，之后强制终止。
+PREEMPT_GRACE_SECONDS = 3
+
+# 约定的 checkpoint 文件路径。支持 checkpoint 的任务应将进度快照写入此路径。
+# Docker 模式下从容器内读取，子进程模式下从本地工作目录读取。
+CHECKPOINT_PATH = "/tmp/cogrid_checkpoint"
 
 
 @dataclass
@@ -37,6 +52,8 @@ class TaskResult:
     stderr: str = ""
     duration_seconds: float = 0.0
     artifact_path: str = ""
+    # 任务被抢占时保存的 checkpoint 数据，回传给协调器以便续跑
+    checkpoint_data: str = ""
 
 
 class TaskExecutor:
@@ -77,6 +94,10 @@ class TaskExecutor:
             - Docker 可用：运行容器（含资源限制、超时、GPU 支持）
             - Docker 不可用：子进程模拟执行
 
+        Checkpoint 支持：
+            - 执行前检查是否有 checkpoint_data（来自上次被抢占的任务），有则记录日志
+            - 超时/被抢占时，若 can_checkpoint=True，尝试从 CHECKPOINT_PATH 读取进度快照
+
         Args:
             task: 协调器分配的任务
 
@@ -90,6 +111,20 @@ class TaskExecutor:
             task.image,
             task.command,
         )
+
+        # 检查是否有可恢复的 checkpoint
+        if task.checkpoint_data:
+            logger.info(
+                "任务 %s 携带 checkpoint 数据（%d 字节），将尝试从断点续跑",
+                task.task_id,
+                len(task.checkpoint_data),
+            )
+        if task.can_checkpoint:
+            logger.info(
+                "任务 %s 支持 checkpoint，超时/抢占时将尝试保存进度到 %s",
+                task.task_id,
+                CHECKPOINT_PATH,
+            )
 
         if self.docker_available:
             return self._execute_docker(task)
@@ -107,6 +142,34 @@ class TaskExecutor:
     # ------------------------------------------------------------------
     # Docker 执行
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _capture_checkpoint_docker(
+        container: Any, can_checkpoint: bool
+    ) -> str:
+        """从容器内读取 checkpoint 文件。
+
+        支持 checkpoint 的任务在被终止前应将进度快照写入 CHECKPOINT_PATH。
+        本方法在容器被 kill 前调用，尝试读取该文件。
+
+        Returns:
+            checkpoint 数据字符串；无法读取或不支持时返回空串。
+        """
+        if not can_checkpoint:
+            return ""
+        try:
+            result = container.exec_run(
+                ["cat", CHECKPOINT_PATH], demux=False
+            )
+            # exec_run 返回 (exit_code, output)
+            if hasattr(result, "exit_code") and result.exit_code == 0:
+                output = result.output
+                if isinstance(output, bytes):
+                    return output.decode("utf-8", errors="replace")
+                return str(output) if output else ""
+        except Exception as e:
+            logger.debug("读取容器 checkpoint 失败: %s", e)
+        return ""
 
     def _execute_docker(self, task: TaskAssignment) -> TaskResult:
         """通过 Docker SDK 执行任务。
@@ -166,20 +229,35 @@ class TaskExecutor:
 
             # 5. 等待容器结束（带超时）
             exit_code = -1
+            checkpoint_data = ""
             try:
                 result = container.wait(timeout=task.timeout_seconds)
                 exit_code = result.get("StatusCode", -1)
             except Exception:
-                # 超时或连接中断：终止容器
+                # 超时或连接中断：先尝试保存 checkpoint，再终止容器
                 logger.warning(
-                    "任务 %s 执行超时（%ds），终止容器",
+                    "任务 %s 执行超时（%ds），尝试保存 checkpoint 后终止容器",
                     task.task_id,
                     task.timeout_seconds,
                 )
+                # 优雅停止：先尝试读取 checkpoint，再 kill
+                checkpoint_data = self._capture_checkpoint_docker(
+                    container, task.can_checkpoint
+                )
+                if checkpoint_data:
+                    logger.info(
+                        "任务 %s 已保存 checkpoint（%d 字节）",
+                        task.task_id,
+                        len(checkpoint_data),
+                    )
+                # 先发 SIGTERM 等待宽限期，再强制 kill
                 try:
-                    container.kill()
+                    container.stop(timeout=PREEMPT_GRACE_SECONDS)
                 except Exception:
-                    pass
+                    try:
+                        container.kill()
+                    except Exception:
+                        pass
                 # 等待容器真正停止
                 try:
                     container.wait(timeout=5)
@@ -213,6 +291,7 @@ class TaskExecutor:
                 stdout=stdout,
                 stderr=stderr,
                 duration_seconds=duration,
+                checkpoint_data=checkpoint_data,
             )
 
         except docker.errors.ImageNotFound:
@@ -268,6 +347,26 @@ class TaskExecutor:
     # 子进程降级执行
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _capture_checkpoint_subprocess(can_checkpoint: bool) -> str:
+        """从本地文件系统读取 checkpoint 文件。
+
+        子进程模式下，任务与执行器在同一文件系统，checkpoint 文件
+        写入 CHECKPOINT_PATH 后可直接读取。
+
+        Returns:
+            checkpoint 数据字符串；无法读取或不支持时返回空串。
+        """
+        if not can_checkpoint:
+            return ""
+        try:
+            if os.path.exists(CHECKPOINT_PATH):
+                with open(CHECKPOINT_PATH, "r", encoding="utf-8") as f:
+                    return f.read()
+        except Exception as e:
+            logger.debug("读取本地 checkpoint 失败: %s", e)
+        return ""
+
     def _execute_subprocess(self, task: TaskAssignment) -> TaskResult:
         """降级方案：子进程模拟执行。
 
@@ -320,14 +419,36 @@ class TaskExecutor:
             )
             exit_code = proc.returncode
         except subprocess.TimeoutExpired:
-            # 超时：终止子进程
+            # 超时：优雅停止——先 SIGTERM 等待宽限期（可保存 checkpoint），
+            # 再强制 SIGKILL
             logger.warning(
-                "任务 %s 执行超时（%ds），终止子进程",
+                "任务 %s 执行超时（%ds），优雅终止子进程",
                 task.task_id,
                 task.timeout_seconds,
             )
-            proc.kill()
-            stdout, stderr = proc.communicate()
+            # 先发 SIGTERM，让任务有机会保存 checkpoint
+            try:
+                proc.terminate()  # 发送 SIGTERM
+            except Exception:
+                pass
+            try:
+                stdout, stderr = proc.communicate(
+                    timeout=PREEMPT_GRACE_SECONDS
+                )
+            except subprocess.TimeoutExpired:
+                # 宽限期内未退出，强制 SIGKILL
+                proc.kill()
+                stdout, stderr = proc.communicate()
+            # 尝试读取 checkpoint
+            checkpoint_data = self._capture_checkpoint_subprocess(
+                task.can_checkpoint
+            )
+            if checkpoint_data:
+                logger.info(
+                    "任务 %s 已保存 checkpoint（%d 字节）",
+                    task.task_id,
+                    len(checkpoint_data),
+                )
             duration = time.monotonic() - start
             return TaskResult(
                 task_id=task.task_id,
@@ -337,6 +458,7 @@ class TaskExecutor:
                 stderr=(stderr or "")
                 + f"\n[超时: {task.timeout_seconds}s]",
                 duration_seconds=duration,
+                checkpoint_data=checkpoint_data,
             )
 
         duration = time.monotonic() - start

@@ -133,6 +133,7 @@ async def _execute_and_report(
             stderr=result.stderr,
             duration=result.duration_seconds,
             artifact_path=result.artifact_path,
+            checkpoint_data=result.checkpoint_data,
         )
 
         if result.success:
@@ -198,6 +199,7 @@ async def _register_with_retry(
     node_name: str,
     monitor: ResourceMonitor,
     intensity: IntensityLevel,
+    owner_user_id: str = "",
     max_retries: int = 3,
 ) -> str:
     """注册节点，带重试。
@@ -213,6 +215,7 @@ async def _register_with_retry(
                 node_name=node_name,
                 resources=resources,
                 intensity=intensity,
+                owner_user_id=owner_user_id,
             )
             return node_id
         except Exception as e:
@@ -233,6 +236,7 @@ async def _run_agent(
     coordinator_url: str,
     node_name: str,
     intensity: IntensityLevel,
+    owner_user_id: str = "",
     heartbeat_interval: int = DEFAULT_HEARTBEAT_INTERVAL,
 ) -> None:
     """Agent 主循环。
@@ -266,6 +270,7 @@ async def _run_agent(
             node_name=node_name,
             monitor=monitor,
             intensity=intensity,
+            owner_user_id=owner_user_id,
         )
     except Exception as e:
         console.print(f"[red]节点注册失败: {e}[/red]")
@@ -366,6 +371,7 @@ async def _run_agent(
                         node_name=node_name,
                         monitor=monitor,
                         intensity=state.intensity,
+                        owner_user_id=owner_user_id,
                         max_retries=1,
                     )
                     logger.info("重新注册成功: %s", state.node_id)
@@ -436,6 +442,13 @@ def main(
         "--heartbeat-interval",
         help="心跳间隔（秒），默认 15",
     ),
+    owner: str = typer.Option(
+        "",
+        "--owner",
+        "-o",
+        envvar="COGRID_OWNER_USER_ID",
+        help="节点归属用户 ID（用于抢占回收鉴权，留空则不绑定）",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -470,6 +483,7 @@ def main(
             coordinator_url=coordinator_url,
             node_name=node_name,
             intensity=intensity_level,
+            owner_user_id=owner,
             heartbeat_interval=heartbeat_interval,
         )
     )

@@ -51,6 +51,11 @@ class Task:
     completed_at: float = 0.0
     # 填充任务特有：产物描述
     artifact_desc: str = ""
+    # 任务 checkpoint 数据（用于被抢占后恢复进度）。抢占时由 Agent 保存，
+    # 重新调度时由 CheckpointManager 加载，交给执行者续跑。
+    checkpoint_data: str = ""
+    # 是否支持 checkpoint。不支持 checkpoint 的任务被抢占时只能从头重跑。
+    can_checkpoint: bool = False
 
     @property
     def is_preemptible(self) -> bool:
@@ -97,3 +102,5 @@ class TaskResult:
     duration_seconds: float = 0.0
     actual_usage: Resources = field(default_factory=Resources)
     artifact_path: str = ""  # 填充任务产物路径
+    # 任务被抢占时保存的 checkpoint 数据，回传给协调器以便续跑。
+    checkpoint_data: str = ""

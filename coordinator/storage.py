@@ -126,6 +126,17 @@ class Storage:
                 description    TEXT NOT NULL DEFAULT '',
                 created_at     REAL NOT NULL
             );
+
+            -- 用户表：多租户认证与角色管理
+            CREATE TABLE IF NOT EXISTS users (
+                user_id        TEXT PRIMARY KEY,
+                username       TEXT NOT NULL UNIQUE,
+                password_hash  TEXT NOT NULL DEFAULT '',
+                salt           TEXT NOT NULL DEFAULT '',
+                token          TEXT NOT NULL DEFAULT '',
+                role           TEXT NOT NULL DEFAULT 'contributor',
+                created_at     REAL NOT NULL
+            );
             """
         )
 
@@ -360,6 +371,99 @@ class Storage:
             params,
         )
         await self._db.commit()
+
+    # ------------------------------------------------------------------
+    # 用户
+    # ------------------------------------------------------------------
+
+    async def save_user(self, user_dict: dict) -> None:
+        """保存或更新用户信息（upsert）。
+
+        Args:
+            user_dict: 包含 user_id, username, password_hash, salt,
+                       token, role, created_at 的字典。
+        """
+        await self._db.execute(
+            """
+            INSERT INTO users
+                (user_id, username, password_hash, salt, token, role, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=excluded.username,
+                password_hash=excluded.password_hash,
+                salt=excluded.salt,
+                token=excluded.token,
+                role=excluded.role
+            """,
+            (
+                user_dict["user_id"],
+                user_dict["username"],
+                user_dict.get("password_hash", ""),
+                user_dict.get("salt", ""),
+                user_dict.get("token", ""),
+                user_dict.get("role", "contributor"),
+                user_dict.get("created_at", time.time()),
+            ),
+        )
+        await self._db.commit()
+
+    async def load_user_by_id(self, user_id: str) -> Optional[dict]:
+        """按 user_id 加载用户，返回字典或 None。"""
+        async with self._db.execute(
+            "SELECT user_id, username, password_hash, salt, token, role, created_at "
+            "FROM users WHERE user_id = ?",
+            (user_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_user_dict(row)
+
+    async def load_user_by_username(self, username: str) -> Optional[dict]:
+        """按 username 加载用户，返回字典或 None。"""
+        async with self._db.execute(
+            "SELECT user_id, username, password_hash, salt, token, role, created_at "
+            "FROM users WHERE username = ?",
+            (username,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_user_dict(row)
+
+    async def load_user_by_token(self, token: str) -> Optional[dict]:
+        """按 token 加载用户，返回字典或 None。"""
+        async with self._db.execute(
+            "SELECT user_id, username, password_hash, salt, token, role, created_at "
+            "FROM users WHERE token = ?",
+            (token,),
+        ) as cursor:
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_user_dict(row)
+
+    async def load_all_users(self) -> list[dict]:
+        """加载所有用户，返回字典列表（用于启动时恢复内存状态）。"""
+        async with self._db.execute(
+            "SELECT user_id, username, password_hash, salt, token, role, created_at "
+            "FROM users"
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [self._row_to_user_dict(r) for r in rows]
+
+    @staticmethod
+    def _row_to_user_dict(row: tuple) -> dict:
+        """将数据库行转换为用户字典。"""
+        return {
+            "user_id": row[0],
+            "username": row[1],
+            "password_hash": row[2],
+            "salt": row[3],
+            "token": row[4],
+            "role": row[5],
+            "created_at": row[6],
+        }
 
     # ------------------------------------------------------------------
     # 算力固存产物

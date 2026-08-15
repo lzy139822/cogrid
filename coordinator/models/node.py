@@ -81,6 +81,12 @@ class Node:
     last_heartbeat: float = field(default_factory=time.time)
     # 当前正在执行的任务 ID 列表
     running_tasks: list[str] = field(default_factory=list)
+    # 节点归属用户（贡献者）。空串表示未绑定，抢占回收时按此字段判断归属。
+    owner_user_id: str = ""
+    # 记录当前在该节点上运行的任务分别占用了哪个用户的份额
+    # {task_id: user_id}：键是被分配的任务 ID，值是占用该节点份额的用户。
+    # 抢占回收时据此判断“谁的弹性任务占了我的份额”。
+    shares_allocated: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_online(self) -> bool:

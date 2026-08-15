@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from coordinator.api import router
+from coordinator.auth import UserManager
 from coordinator.filler import Filler
 from coordinator.ledger import Ledger
 from coordinator.prober import Prober
@@ -49,8 +50,12 @@ async def lifespan(app: FastAPI):
     prober = Prober(queue, ledger)
     filler = Filler(queue, scheduler)
 
-    # 从存储恢复历史状态（贡献记录、未完成任务）
+    # 初始化用户认证管理器（注入 Storage 实现用户持久化）
+    user_manager = UserManager(storage)
+
+    # 从存储恢复历史状态（用户、贡献记录、未完成任务）
     try:
+        await user_manager.load_from_storage()
         await ledger.load_from_storage()
         await queue.load_from_storage()
     except Exception:
@@ -65,6 +70,7 @@ async def lifespan(app: FastAPI):
         "prober": prober,
         "filler": filler,
         "storage": storage,
+        "user_manager": user_manager,
     }
     app.state.scheduler = scheduler
     app.state.queue = queue
@@ -72,6 +78,7 @@ async def lifespan(app: FastAPI):
     app.state.prober = prober
     app.state.filler = filler
     app.state.storage = storage
+    app.state.user_manager = user_manager
 
     # 启动后台循环
     bg_task = asyncio.create_task(background_loop(scheduler, queue, prober, filler))
@@ -94,6 +101,7 @@ async def background_loop(
     """后台循环：每 5 秒执行一次维护任务。
 
     - 检查节点超时
+    - 自动抢占检查（为排队的高优先级任务抢占低优先级弹性任务）
     - 生成并发送 PoA 探针
     - 检查池空闲并生成填充任务
     - 尝试调度待处理任务
@@ -105,7 +113,14 @@ async def background_loop(
             if offline:
                 logger.warning(f"Nodes went offline: {offline}")
 
-            # 2. 为在线节点生成探针
+            # 2. 自动抢占检查：为排队的高优先级任务抢占低优先级弹性任务
+            preempted = scheduler.check_and_preempt()
+            if preempted:
+                logger.info(
+                    f"Auto-preempt: freed {preempted} tasks for pending user tasks"
+                )
+
+            # 3. 为在线节点生成探针
             online_nodes = scheduler.get_online_nodes()
             for node in online_nodes:
                 if prober.should_probe(node):
@@ -113,7 +128,7 @@ async def background_loop(
                     queue.enqueue(probe)
                     logger.info(f"PoA probe dispatched to {node.name}")
 
-            # 3. 检查池空闲并生成填充任务
+            # 4. 检查池空闲并生成填充任务
             if filler.is_pool_idle():
                 filler_tasks = filler.generate_filler_tasks()
                 for ft in filler_tasks:
@@ -121,7 +136,7 @@ async def background_loop(
                 if filler_tasks:
                     logger.info(f"Dispatched {len(filler_tasks)} filler tasks (compute solidification)")
 
-            # 4. 尝试调度待处理任务
+            # 5. 尝试调度待处理任务
             while True:
                 result = scheduler.schedule_next()
                 if result is None:

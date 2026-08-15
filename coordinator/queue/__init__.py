@@ -142,6 +142,55 @@ class TaskQueue:
             if t.status == TaskStatus.RUNNING and t.task_type == TaskType.FILLER
         ]
 
+    def get_running_tasks(self) -> list[Task]:
+        """获取所有运行中（RUNNING）的任务。
+
+        用于抢占回收时遍历可被抢占的候选任务集合。
+        """
+        return [t for t in self._all.values() if t.status == TaskStatus.RUNNING]
+
+    def get_tasks_by_user(
+        self, user_id: str, status: "Optional[TaskStatus]" = None
+    ) -> list[Task]:
+        """按提交者过滤任务。
+
+        Args:
+            user_id: 提交者 ID
+            status: 可选状态过滤；为 None 时返回该用户的所有任务
+
+        Returns:
+            匹配的任务列表（按创建时间升序）
+        """
+        tasks = [
+            t for t in self._all.values()
+            if t.user_id == user_id and (status is None or t.status == status)
+        ]
+        tasks.sort(key=lambda t: t.created_at)
+        return tasks
+
+    def requeue(self, task_id: str) -> bool:
+        """任务重新入队（状态重置为 PENDING，清空 assigned_node）。
+
+        用于抢占回收和节点离线后把任务重新放回队列等待调度。
+        重置 started_at / completed_at，使任务回到“未开始”状态。
+
+        Returns:
+            True 表示成功重新入队；False 表示任务不存在。
+        """
+        task = self._all.get(task_id)
+        if task is None:
+            return False
+        task.status = TaskStatus.PENDING
+        task.assigned_node = ""
+        task.started_at = 0.0
+        task.completed_at = 0.0
+        # 路由回对应优先级桶。dequeue 会跳过非 PENDING 的陈旧条目，
+        # 因此即便桶中存在旧引用也不会造成重复出队。
+        self._route(task).append(task)
+        self._persist(task)
+        logger.info(f"Task requeued: {task_id}")
+        return True
+
     def _route(self, task: Task) -> deque[Task]:
         """将任务路由到对应优先级桶。"""
         if task.task_type == TaskType.USER_TASK and not task.preemptible:

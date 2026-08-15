@@ -7,9 +7,11 @@
 from coordinator.models.node import Node, NodeStatus, Resources
 from coordinator.models.task import Task, TaskStatus, TaskType, TaskAssignment, TaskResult
 from coordinator.models.contribution import ContributionRecord
+from coordinator.models.user import User, UserRole
 
 __all__ = [
     "Node", "NodeStatus", "Resources",
     "Task", "TaskStatus", "TaskType", "TaskAssignment", "TaskResult",
     "ContributionRecord",
+    "User", "UserRole",
 ]

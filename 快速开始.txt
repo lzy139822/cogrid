@@ -1,0 +1,38 @@
+Cogrid Desktop Build Kit - Quick Start
+======================================
+
+Step 1: Install Python
+  Download Python 3.11+ from https://www.python.org/downloads/
+  Check "Add Python to PATH" during installation
+
+Step 2: Run build script
+  Double-click: desktop\build.bat
+  Wait 3-5 minutes for PyInstaller to build
+
+Step 3: Run the app
+  Output: dist\cogrid.exe
+  Double-click cogrid.exe to start
+  Browser opens automatically at http://127.0.0.1:8000
+
+
+Files included:
+  desktop\build.bat          - Build script (double-click to run)
+  desktop\cogrid.spec        - PyInstaller config (verified)
+  desktop\launcher.py        - App entry point
+  requirements-desktop.txt   - Python dependencies
+  dashboard\dist\            - Pre-built dashboard (no npm needed)
+  coordinator\               - Server source code
+  agent\                     - Agent source code
+  cli\                       - CLI client source code
+
+
+Common issues:
+  - "Python not found": Reinstall Python, check "Add to PATH"
+  - "pip not found": Same as above
+  - Antivirus blocking: Add cogrid folder to whitelist
+  - Port 8000 in use: Close other programs using port 8000
+
+
+For more docs:
+  desktop\README.md          - Full documentation
+  PROJECT_STATUS.md          - Project status

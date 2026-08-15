@@ -40,7 +40,9 @@ from agent.reporter import (
     DEFAULT_HEARTBEAT_INTERVAL,
     TaskAssignment,
     heartbeat,
+    login as auth_login,
     register,
+    register_user as auth_register_user,
     report_result,
     set_intensity,
 )
@@ -88,6 +90,10 @@ class AgentState:
     shutdown_requested: bool = False
     tasks_completed: int = 0
     tasks_failed: int = 0
+    tasks_retried: int = 0
+    # 认证信息
+    user_id: str = ""
+    token: str = ""
 
     def request_shutdown(self) -> None:
         """请求优雅关闭。"""
@@ -110,56 +116,89 @@ class AgentState:
 # ------------------------------------------------------------------
 
 
+# 任务失败时的最大重试次数（仅对瞬时错误重试，非任务本身失败）
+MAX_TASK_RETRIES = 2
+
+
 async def _execute_and_report(
     state: AgentState,
     executor: TaskExecutor,
     coordinator_url: str,
     task: TaskAssignment,
 ) -> None:
-    """执行单个任务并上报结果。
+    """执行单个任务并上报结果，支持瞬时错误重试。
 
     Docker / 子进程执行是阻塞操作，通过 asyncio.to_thread
     在线程池中运行，不阻塞事件循环。
+
+    重试策略：
+    - 任务执行本身失败（exit_code != 0）不重试，直接上报
+    - 上报结果时的网络错误重试 MAX_TASK_RETRIES 次
     """
+    result = None
     try:
         result = await asyncio.to_thread(executor.execute_task, task)
-
-        await report_result(
-            coordinator_url=coordinator_url,
-            task_id=result.task_id,
-            success=result.success,
-            exit_code=result.exit_code,
-            stdout=result.stdout,
-            stderr=result.stderr,
-            duration=result.duration_seconds,
-            artifact_path=result.artifact_path,
-            checkpoint_data=result.checkpoint_data,
-        )
-
-        if result.success:
-            state.tasks_completed += 1
-        else:
-            state.tasks_failed += 1
-
     except Exception as e:
         logger.error(
-            "任务 %s 执行/上报失败: %s", task.task_id, e, exc_info=True
+            "任务 %s 执行失败: %s", task.task_id, e, exc_info=True
         )
         state.tasks_failed += 1
+        # 尽力上报失败结果
+        for attempt in range(1, MAX_TASK_RETRIES + 1):
+            try:
+                await report_result(
+                    coordinator_url=coordinator_url,
+                    task_id=task.task_id,
+                    success=False,
+                    exit_code=-1,
+                    stdout="",
+                    stderr=f"Agent 内部错误: {e}",
+                    duration=0.0,
+                    token=state.token,
+                )
+                return
+            except Exception:
+                if attempt < MAX_TASK_RETRIES:
+                    state.tasks_retried += 1
+                    await asyncio.sleep(attempt * 2)
+        return
 
-        # 尽力上报失败结果（best-effort，不阻塞主循环）
+    # 上报结果（带重试）
+    for attempt in range(1, MAX_TASK_RETRIES + 2):  # 1 次正常 + MAX 次重试
         try:
             await report_result(
                 coordinator_url=coordinator_url,
-                task_id=task.task_id,
-                success=False,
-                exit_code=-1,
-                stdout="",
-                stderr=f"Agent 内部错误: {e}",
-                duration=0.0,
+                task_id=result.task_id,
+                success=result.success,
+                exit_code=result.exit_code,
+                stdout=result.stdout,
+                stderr=result.stderr,
+                duration=result.duration_seconds,
+                artifact_path=result.artifact_path,
+                checkpoint_data=result.checkpoint_data,
+                token=state.token,
             )
-        except Exception:
-            pass
+            if result.success:
+                state.tasks_completed += 1
+            else:
+                state.tasks_failed += 1
+            return
+        except Exception as e:
+            if attempt <= MAX_TASK_RETRIES:
+                logger.warning(
+                    "任务 %s 结果上报失败（第 %d 次）: %s，%ds 后重试...",
+                    task.task_id,
+                    attempt,
+                    e,
+                    attempt * 2,
+                )
+                state.tasks_retried += 1
+                await asyncio.sleep(attempt * 2)
+            else:
+                logger.error(
+                    "任务 %s 结果上报最终失败: %s", task.task_id, e
+                )
+                state.tasks_failed += 1
 
 
 async def _heartbeat_cycle(
@@ -181,6 +220,7 @@ async def _heartbeat_cycle(
         node_id=state.node_id,
         resources=load,
         intensity=state.intensity,
+        token=state.token,
     )
 
     # 3. 并发执行所有任务并上报结果
@@ -200,6 +240,7 @@ async def _register_with_retry(
     monitor: ResourceMonitor,
     intensity: IntensityLevel,
     owner_user_id: str = "",
+    token: str = "",
     max_retries: int = 3,
 ) -> str:
     """注册节点，带重试。
@@ -216,6 +257,7 @@ async def _register_with_retry(
                 resources=resources,
                 intensity=intensity,
                 owner_user_id=owner_user_id,
+                token=token,
             )
             return node_id
         except Exception as e:
@@ -238,25 +280,52 @@ async def _run_agent(
     intensity: IntensityLevel,
     owner_user_id: str = "",
     heartbeat_interval: int = DEFAULT_HEARTBEAT_INTERVAL,
+    token: str = "",
+    username: str = "",
+    password: str = "",
 ) -> None:
     """Agent 主循环。
 
     流程：
-        1. 打印启动信息与物理资源
-        2. 注册节点（带重试）
-        3. 设置信号处理器
-        4. 心跳主循环（每 heartbeat_interval 秒一轮）
-        5. 收到关闭信号后优雅退出
+        1. 认证（可选）：通过 username/password 登录或注册获取 token
+        2. 打印启动信息与物理资源
+        3. 注册节点（带重试）
+        4. 设置信号处理器
+        5. 心跳主循环（每 heartbeat_interval 秒一轮）
+        6. 收到关闭信号后优雅退出
     """
-    state = AgentState(intensity=intensity)
+    state = AgentState(intensity=intensity, token=token)
     monitor = ResourceMonitor()
     executor = TaskExecutor()
+
+    # ---- 认证（可选） ----
+    if not state.token and username and password:
+        try:
+            state.user_id, state.token = await auth_login(
+                coordinator_url, username, password
+            )
+            logger.info("认证成功: %s -> %s", username, state.user_id)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 401:
+                # 用户不存在，尝试注册
+                logger.info("用户 %s 不存在，尝试注册...", username)
+                state.user_id, state.token = await auth_register_user(
+                    coordinator_url, username, password
+                )
+                logger.info("注册成功: %s -> %s", username, state.user_id)
+            else:
+                raise
+        # 认证后 owner_user_id 自动设为当前用户
+        if not owner_user_id:
+            owner_user_id = state.user_id
 
     # ---- 打印启动信息 ----
     console.print()
     console.print("[bold cyan]Cogrid 节点 Agent[/bold cyan]", justify="center")
     console.print(f"  协调器:   {coordinator_url}")
     console.print(f"  节点名:   {node_name}")
+    if state.user_id:
+        console.print(f"  用户:     {state.user_id}")
     console.print(
         f"  强度档位: {intensity.value}（{intensity.label}，"
         f"保留 {intensity.reserve_ratio:.0%}）"
@@ -271,6 +340,7 @@ async def _run_agent(
             monitor=monitor,
             intensity=intensity,
             owner_user_id=owner_user_id,
+            token=state.token,
         )
     except Exception as e:
         console.print(f"[red]节点注册失败: {e}[/red]")
@@ -323,7 +393,7 @@ async def _run_agent(
             )
             # 异步通知协调器（不阻塞信号处理器）
             asyncio.create_task(
-                set_intensity(coordinator_url, state.node_id, new_level)
+                set_intensity(coordinator_url, state.node_id, new_level, token=state.token)
             )
         except Exception as e:
             logger.error("切换强度档位失败: %s", e, exc_info=True)
@@ -372,6 +442,7 @@ async def _run_agent(
                         monitor=monitor,
                         intensity=state.intensity,
                         owner_user_id=owner_user_id,
+                        token=state.token,
                         max_retries=1,
                     )
                     logger.info("重新注册成功: %s", state.node_id)
@@ -406,7 +477,10 @@ async def _run_agent(
     stats.add_column("数值", style="green")
     stats.add_row("成功任务", str(state.tasks_completed))
     stats.add_row("失败任务", str(state.tasks_failed))
+    stats.add_row("重试次数", str(state.tasks_retried))
     stats.add_row("节点 ID", state.node_id)
+    if state.user_id:
+        stats.add_row("用户 ID", state.user_id)
     console.print(stats)
     console.print()
     console.print("[green]Agent 已关闭。[/green]")
@@ -449,6 +523,27 @@ def main(
         envvar="COGRID_OWNER_USER_ID",
         help="节点归属用户 ID（用于抢占回收鉴权，留空则不绑定）",
     ),
+    token: str = typer.Option(
+        "",
+        "--token",
+        "-t",
+        envvar="COGRID_AUTH_TOKEN",
+        help="认证 token（Bearer）。提供后所有请求自动携带认证头。",
+    ),
+    username: str = typer.Option(
+        "",
+        "--username",
+        "-u",
+        envvar="COGRID_USERNAME",
+        help="用户名（与 --password 配合使用，启动时自动登录/注册）",
+    ),
+    password: str = typer.Option(
+        "",
+        "--password",
+        "-p",
+        envvar="COGRID_PASSWORD",
+        help="密码（与 --username 配合使用）",
+    ),
     verbose: bool = typer.Option(
         False,
         "--verbose",
@@ -456,15 +551,21 @@ def main(
         help="启用 DEBUG 级别日志",
     ),
 ) -> None:
-    """启动 Cogrid 节点 Agent，连接协调器并开始贡献算力。"""
+    """启动 Cogrid 节点 Agent，连接协调器并开始贡献算力。
+
+    认证方式（三选一，优先级从高到低）：
+    1. --token：直接提供已有 token
+    2. --username + --password：启动时自动登录（用户不存在则自动注册）
+    3. 无认证：兼容旧模式（需协调器设置 COGRID_AUTH_DISABLED=1）
+    """
     _setup_logging(verbose=verbose)
 
-    # 解析协调器地址：CLI 参数 > 环境变量 > 默认值
+    # 解析协调器地址
     coordinator_url = coordinator or os.environ.get(
         "COGRID_COORDINATOR_URL", "http://localhost:8000/api/v1"
     )
 
-    # 解析节点名：未指定时使用主机名
+    # 解析节点名
     node_name = name or socket.gethostname()
 
     # 解析强度档位
@@ -485,6 +586,9 @@ def main(
             intensity=intensity_level,
             owner_user_id=owner,
             heartbeat_interval=heartbeat_interval,
+            token=token,
+            username=username,
+            password=password,
         )
     )
 

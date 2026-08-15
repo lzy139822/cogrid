@@ -76,12 +76,93 @@ def _normalize_url(coordinator_url: str) -> str:
     return coordinator_url.rstrip("/")
 
 
+def _auth_headers(token: str = "") -> dict:
+    """构造认证请求头。
+
+    Args:
+        token: Bearer token。为空时返回空字典（兼容无认证场景）。
+
+    Returns:
+        包含 Authorization header 的字典，或空字典。
+    """
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def login(
+    coordinator_url: str,
+    username: str,
+    password: str,
+) -> tuple[str, str]:
+    """用户登录，获取 user_id 和 token。
+
+    Args:
+        coordinator_url: 协调器 REST API 基地址
+        username:        用户名
+        password:        密码
+
+    Returns:
+        (user_id, token) 元组
+
+    Raises:
+        httpx.HTTPStatusError: 登录失败（401 用户名/密码错误）
+        httpx.RequestError:    网络错误
+    """
+    base = _normalize_url(coordinator_url)
+    payload = {"username": username, "password": password}
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.post(f"{base}/auth/login", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+
+    user_id = data["user_id"]
+    token = data["token"]
+    logger.info("用户登录成功: %s -> %s", username, user_id)
+    return (user_id, token)
+
+
+async def register_user(
+    coordinator_url: str,
+    username: str,
+    password: str,
+) -> tuple[str, str]:
+    """用户注册，获取 user_id 和 token。
+
+    Args:
+        coordinator_url: 协调器 REST API 基地址
+        username:        用户名
+        password:        密码
+
+    Returns:
+        (user_id, token) 元组
+
+    Raises:
+        httpx.HTTPStatusError: 注册失败（409 用户名已存在）
+        httpx.RequestError:    网络错误
+    """
+    base = _normalize_url(coordinator_url)
+    payload = {"username": username, "password": password}
+
+    async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
+        resp = await client.post(f"{base}/auth/register", json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+
+    user_id = data["user_id"]
+    token = data["token"]
+    logger.info("用户注册成功: %s -> %s", username, user_id)
+    return (user_id, token)
+
+
 async def register(
     coordinator_url: str,
     node_name: str,
     resources: Optional[SystemResources] = None,
     intensity: IntensityLevel = IntensityLevel.BALANCED,
     owner_user_id: str = "",
+    token: str = "",
 ) -> str:
     """注册节点到协调器。
 
@@ -91,6 +172,7 @@ async def register(
         resources:       物理资源总量；为 None 时自动检测
         intensity:       初始强度档位
         owner_user_id:   节点归属用户 ID（用于抢占回收鉴权）
+        token:           认证 token（Bearer）。认证后节点自动归属该用户。
 
     Returns:
         协调器分配的 node_id
@@ -100,7 +182,6 @@ async def register(
         httpx.RequestError:    网络错误（协调器不可达）
     """
     if resources is None:
-        # 延迟导入，避免 reporter -> monitor 的硬依赖循环
         from agent.monitor import ResourceMonitor
 
         resources = ResourceMonitor().detect_resources()
@@ -115,8 +196,9 @@ async def register(
         "owner_user_id": owner_user_id,
     }
 
+    headers = _auth_headers(token)
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.post(f"{base}/nodes/register", json=payload)
+        resp = await client.post(f"{base}/nodes/register", json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
 
@@ -136,6 +218,7 @@ async def heartbeat(
     node_id: str,
     resources: SystemResources,
     intensity: IntensityLevel,
+    token: str = "",
 ) -> list[TaskAssignment]:
     """发送心跳，上报资源并领取任务。
 
@@ -144,6 +227,7 @@ async def heartbeat(
         node_id:         节点 ID
         resources:       当前负载快照（含物理总量和使用率）
         intensity:       当前强度档位
+        token:           认证 token（可选，心跳接口不强制认证）
 
     Returns:
         协调器分配给本节点的任务列表（可能为空）
@@ -164,8 +248,9 @@ async def heartbeat(
         "intensity": intensity.value,
     }
 
+    headers = _auth_headers(token)
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.post(f"{base}/nodes/heartbeat", json=payload)
+        resp = await client.post(f"{base}/nodes/heartbeat", json=payload, headers=headers)
         resp.raise_for_status()
         data = resp.json()
 
@@ -186,6 +271,7 @@ async def report_result(
     duration: float,
     artifact_path: str = "",
     checkpoint_data: str = "",
+    token: str = "",
 ) -> None:
     """上报任务执行结果。
 
@@ -199,13 +285,13 @@ async def report_result(
         duration:        执行时长（秒）
         artifact_path:   产物路径（填充任务）
         checkpoint_data: 任务被抢占时保存的进度快照，用于续跑
+        token:           认证 token（可选）
     """
     base = _normalize_url(coordinator_url)
     payload = {
         "task_id": task_id,
         "success": success,
         "exit_code": exit_code,
-        # 限制输出长度，避免请求体过大
         "stdout": stdout[:MAX_OUTPUT_CHARS],
         "stderr": stderr[:MAX_OUTPUT_CHARS],
         "duration_seconds": round(duration, 3),
@@ -213,8 +299,9 @@ async def report_result(
         "checkpoint_data": checkpoint_data[:MAX_OUTPUT_CHARS],
     }
 
+    headers = _auth_headers(token)
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
-        resp = await client.post(f"{base}/tasks/report", json=payload)
+        resp = await client.post(f"{base}/tasks/report", json=payload, headers=headers)
         resp.raise_for_status()
 
     logger.info(
@@ -230,6 +317,7 @@ async def set_intensity(
     coordinator_url: str,
     node_id: str,
     intensity: IntensityLevel,
+    token: str = "",
 ) -> None:
     """远程设置节点强度档位。
 
@@ -237,13 +325,15 @@ async def set_intensity(
         coordinator_url: 协调器 REST API 基地址
         node_id:         节点 ID
         intensity:       目标强度档位
+        token:           认证 token（可选）
     """
     base = _normalize_url(coordinator_url)
     payload = {"intensity": intensity.value}
 
+    headers = _auth_headers(token)
     async with httpx.AsyncClient(timeout=HTTP_TIMEOUT) as client:
         resp = await client.post(
-            f"{base}/nodes/{node_id}/intensity", json=payload
+            f"{base}/nodes/{node_id}/intensity", json=payload, headers=headers
         )
         resp.raise_for_status()
 

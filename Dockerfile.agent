@@ -1,0 +1,17 @@
+# Cogrid Agent Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装依赖
+COPY agent/pyproject.toml ./
+RUN pip install --no-cache-dir httpx psutil docker typer rich
+
+# 复制代码
+COPY agent/ ./agent/
+
+# 环境变量
+ENV PYTHONPATH=/app
+ENV COGRID_COORDINATOR_URL=http://coordinator:8000/api/v1
+
+CMD ["python", "-m", "agent.main", "--name", "${COGRID_NODE_NAME:-agent}", "--intensity", "${COGRID_INTENSITY:-balanced}"]

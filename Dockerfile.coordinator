@@ -1,0 +1,24 @@
+# Cogrid 协调器 Dockerfile
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# 安装依赖
+COPY coordinator/pyproject.toml ./
+RUN pip install --no-cache-dir fastapi uvicorn[standard] pydantic httpx aiosqlite
+
+# 复制代码
+COPY coordinator/ ./coordinator/
+COPY proto/ ./proto/
+
+# 环境变量
+ENV PYTHONPATH=/app
+ENV COGRID_DB_PATH=/data/cogrid.db
+ENV COGRID_LOG_LEVEL=info
+
+# 数据卷
+VOLUME ["/data"]
+
+EXPOSE 8000
+
+CMD ["python", "-m", "uvicorn", "coordinator.main:app", "--host", "0.0.0.0", "--port", "8000"]

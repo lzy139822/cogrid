@@ -6,7 +6,7 @@
 
 ## 当前阶段
 
-设计完成 — 已发布 GitHub，点火开发中
+点火开发中 — 协调器 + Agent + CLI 核心已实现
 
 **仓库地址**：https://github.com/lzy139822/cogrid
 
@@ -17,18 +17,29 @@
 | 设计文档 | 100% | [docs/specs/2026-08-15-cogrid-design.md](docs/specs/2026-08-15-cogrid-design.md) |
 | 架构决策 ADR-001 | 100% | Python/FastAPI 架构选型 |
 | 架构决策 ADR-002 | 100% | 算力固存机制 |
-| 项目骨架 | 100% | 目录结构、README、LICENSE、CI 配置 |
+| 协调器核心 | 90% | 节点注册/心跳、贡献账本、调度器、任务队列、PoA探针、算力固存、REST API — 已通过端到端冒烟测试 |
+| Python Agent | 85% | 资源上报、负载监测、强度档位、Docker/子进程执行、探针响应 — 已通过端到端测试 |
+| CLI 客户端 | 80% | register/submit/status/contribution/leaderboard/pool/nodes/intensity 命令 |
+| 单元测试 | 80% | 22 个测试全部通过（账本、调度器、队列、探针、固存） |
+| Docker | 70% | Dockerfile.coordinator + Dockerfile.agent + docker-compose.yml |
 
-## 进行中
+## 点火验证结果
 
-无。设计阶段已结束，等待点火开发启动。
+端到端冒烟测试已通过：
+1. **消费链路**：注册节点 → 提交任务 → 调度器分配 → 节点收到任务 ✓
+2. **固存链路**：节点挂机 → PoA探针自动派发 → 填充任务自动生成 → 贡献分累积 ✓
+3. **贡献系统**：贡献分按资源量×时长×探针成功率累积，份额比例正确计算 ✓
 
 ## 下一个接手者应从哪里开始
 
 1. 阅读 [设计文档](docs/specs/2026-08-15-cogrid-design.md) 了解全貌
-2. 阅读 [ADR-001](docs/adr/ADR-001-python-fastapi-architecture.md) 和 [ADR-002](docs/adr/ADR-002-compute-solidification.md) 了解关键决策
-3. 从点火 MVP 的第 1 项开始：**协调器核心**（节点注册/心跳、贡献账本、按比例调度器、任务队列、PoA 探针派发）
-4. 参考 MVP 验证标准（设计文档 §7），先跑通消费链路，再跑通固存链路
+2. 运行 `make test` 确认 22 个测试通过
+3. 运行协调器 + Agent 做端到端测试（见下方命令）
+4. 下一步重点：
+   - 完善仪表盘（React + Vite）
+   - Agent 实际 Docker 执行测试（当前用子进程降级）
+   - 持久化存储（SQLite 替代内存存储）
+   - gRPC 迁移（proto 已定义）
 
 ## 点火 MVP 待办
 

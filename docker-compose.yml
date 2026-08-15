@@ -1,10 +1,15 @@
 # Cogrid 本地开发环境
-# 一键拉起：make dev 或 docker-compose up --build
+# 一键拉起：docker-compose up --build
 #
 # 启动后：
 #   - 协调器 API: http://localhost:8000
 #   - 仪表盘:     http://localhost:3000
 #   - API 文档:   http://localhost:8000/docs
+#
+# 认证说明：
+#   默认开启认证。Agent 通过 COGRID_USERNAME/COGRID_PASSWORD 自动登录。
+#   也可设置 COGRID_AUTH_DISABLED=1 关闭认证（仅测试用）。
+#   首次使用需通过 CLI 注册用户：cogrid register-user --username alice --password alice123
 
 services:
   # 协调器 — 系统中枢
@@ -17,6 +22,8 @@ services:
     environment:
       - COGRID_DB_PATH=/data/cogrid.db
       - COGRID_LOG_LEVEL=info
+      # 设置 COGRID_AUTH_DISABLED=1 可关闭认证（仅测试用）
+      # - COGRID_AUTH_DISABLED=1
     volumes:
       - coordinator-data:/data
     healthcheck:
@@ -35,6 +42,9 @@ services:
       - COGRID_COORDINATOR_URL=http://coordinator:8000/api/v1
       - COGRID_NODE_NAME=agent-1
       - COGRID_INTENSITY=conservative
+      # 认证（首次使用前需注册用户，或关闭协调器认证）
+      - COGRID_USERNAME=agent1
+      - COGRID_PASSWORD=agent1pass
     depends_on:
       coordinator:
         condition: service_healthy
@@ -51,6 +61,8 @@ services:
       - COGRID_COORDINATOR_URL=http://coordinator:8000/api/v1
       - COGRID_NODE_NAME=agent-2
       - COGRID_INTENSITY=balanced
+      - COGRID_USERNAME=agent2
+      - COGRID_PASSWORD=agent2pass
     depends_on:
       coordinator:
         condition: service_healthy
@@ -67,6 +79,8 @@ services:
       - COGRID_COORDINATOR_URL=http://coordinator:8000/api/v1
       - COGRID_NODE_NAME=agent-3
       - COGRID_INTENSITY=aggressive
+      - COGRID_USERNAME=agent3
+      - COGRID_PASSWORD=agent3pass
     depends_on:
       coordinator:
         condition: service_healthy

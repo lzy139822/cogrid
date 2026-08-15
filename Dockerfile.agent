@@ -7,11 +7,15 @@ WORKDIR /app
 COPY agent/pyproject.toml ./
 RUN pip install --no-cache-dir httpx psutil docker typer rich
 
-# 复制代码
+# 复制代码和入口脚本
 COPY agent/ ./agent/
+COPY agent/entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # 环境变量
 ENV PYTHONPATH=/app
 ENV COGRID_COORDINATOR_URL=http://coordinator:8000/api/v1
+# 认证（可选）：设置后 Agent 启动时自动登录/注册
+# COGRID_USERNAME / COGRID_PASSWORD 或 COGRID_AUTH_TOKEN
 
-CMD ["python", "-m", "agent.main", "--name", "${COGRID_NODE_NAME:-agent}", "--intensity", "${COGRID_INTENSITY:-balanced}"]
+ENTRYPOINT ["/app/entrypoint.sh"]

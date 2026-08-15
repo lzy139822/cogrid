@@ -1,0 +1,43 @@
+# Cogrid 配置文件示例
+# 复制为 config.toml 并按需修改
+
+[coordinator]
+host = "0.0.0.0"
+rest_port = 8000
+grpc_port = 50051
+db_path = "data/cogrid.db"
+log_level = "info"
+
+[scheduler]
+# 调度器检查间隔（秒）
+check_interval = 5
+# 基础保障额度（份额为零的用户也能获得的最低算力比例）
+baseline_guarantee = 0.05
+# 弹性池允许的最大超额倍数
+elastic_max_multiplier = 3.0
+
+[prober]
+# PoA 探针间隔（秒）
+interval = 300
+# 探针超时（秒）
+timeout = 30
+# 探针成功率影响系数（0-1，越低则失败惩罚越大）
+penalty_factor = 0.8
+
+[filler]
+# 是否启用算力固存
+enabled = true
+# 池空闲阈值（低于此比例触发填充任务）
+idle_threshold = 0.3
+# 填充任务类型优先级
+priority = ["image-build", "precompute-cache", "boinc", "community-model"]
+# 产物最大存储（GB）
+max_storage_gb = 50
+
+[agent]
+# 默认强度档位：conservative | balanced | aggressive
+intensity = "balanced"
+# 心跳间隔（秒）
+heartbeat_interval = 15
+# 负载检查间隔（秒）
+monitor_interval = 5

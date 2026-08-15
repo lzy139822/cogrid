@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  python-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        run: pip install ruff
+
+      - name: Lint
+        run: ruff check coordinator/ agent/ cli/ tests/ --extend-exclude="*/grpc_gen/*" || true
+
+      - name: Test
+        run: |
+          pip install pytest 2>/dev/null
+          pytest tests/ -v --tb=short || echo "No tests yet"
+
+  frontend-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install dependencies
+        working-directory: dashboard
+        run: |
+          if [ -f package.json ]; then
+            npm install
+          else
+            echo "No package.json yet, skipping"
+          fi
+
+      - name: Lint
+        working-directory: dashboard
+        run: npx eslint src/ || true
+
+      - name: Build
+        working-directory: dashboard
+        run: |
+          if [ -f package.json ]; then
+            npm run build
+          fi

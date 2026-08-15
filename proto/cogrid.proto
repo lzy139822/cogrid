@@ -1,0 +1,122 @@
+// Cogrid gRPC 协议定义
+// 协调器 ↔ Agent 通信契约
+//
+// 这个文件是跨语言契约：任何语言实现的 Agent 都遵循此协议。
+// Python 参考版 Agent 直接使用此 proto 生成代码。
+// 未来 Go 版 Agent 也可用此 proto 生成 Go 代码。
+
+syntax = "proto3";
+
+package cogrid;
+
+// ===== 节点管理 =====
+
+message RegisterRequest {
+  string node_name = 1;
+  Resources resources = 2;   // 节点可用资源
+  string intensity = 3;       // 强度档位: conservative/balanced/aggressive
+}
+
+message RegisterResponse {
+  string node_id = 1;
+  string token = 2;           // 后续通信的认证 token
+  int32 heartbeat_interval = 3; // 心跳间隔（秒）
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  Resources current_load = 2;  // 当前本地负载
+  Resources available = 3;     // 当前可奉献资源
+  string intensity = 4;        // 当前档位
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+  // 待执行的任务（如果有）
+  repeated TaskAssignment tasks = 2;
+}
+
+// ===== 资源模型 =====
+
+message Resources {
+  int32 cpu_cores = 1;
+  int32 gpu_count = 2;
+  int32 memory_mb = 3;
+  // 资源利用率（0-100）
+  int32 cpu_usage_percent = 4;
+  int32 gpu_usage_percent = 5;
+  int32 memory_usage_percent = 6;
+}
+
+// ===== 任务模型 =====
+
+message TaskAssignment {
+  string task_id = 1;
+  string image = 2;            // Docker 镜像
+  repeated string command = 3; // 启动命令
+  Resources requirement = 4;   // 资源需求
+  int32 timeout_seconds = 5;   // 超时
+  TaskType type = 6;           // 任务类型
+  bool preemptible = 7;        // 是否可被抢占
+}
+
+enum TaskType {
+  TASK_TYPE_UNSPECIFIED = 0;
+  USER_TASK = 1;              // 用户提交的任务
+  PROBE = 2;                  // PoA 探针
+  FILLER = 3;                 // 填充任务（算力固存）
+}
+
+message TaskResult {
+  string task_id = 1;
+  bool success = 2;
+  int32 exit_code = 3;
+  bytes stdout = 4;
+  bytes stderr = 5;
+  int32 duration_seconds = 6;
+  Resources actual_usage = 7;
+  // 产物路径（填充任务）
+  string artifact_path = 8;
+}
+
+message PreemptRequest {
+  string task_id = 1;
+  bool graceful = 2;  // 是否优雅停止（checkpoint 友好）
+}
+
+message PreemptResponse {
+  bool acknowledged = 1;
+}
+
+// ===== 贡献查询 =====
+
+message ContributionQuery {
+  string node_id = 1;
+}
+
+message ContributionReport {
+  double total_credits = 1;      // 总贡献分
+  double share_ratio = 2;        // 当前份额比例
+  int32 probe_success_rate = 3;  // 探针成功率（0-100）
+  double quality_factor = 4;     // 质量系数
+  int64 online_seconds = 5;      // 在线总时长
+}
+
+// ===== 服务定义 =====
+
+service NodeService {
+  // 节点注册
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  
+  // 心跳（双向流：Agent 上报状态，协调器下发任务）
+  rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+  
+  // 任务结果上报
+  rpc ReportResult(TaskResult) returns (HeartbeatResponse);
+  
+  // 抢占通知
+  rpc Preempt(PreemptRequest) returns (PreemptResponse);
+  
+  // 贡献查询
+  rpc QueryContribution(ContributionQuery) returns (ContributionReport);
+}

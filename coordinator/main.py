@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -164,11 +165,46 @@ app = FastAPI(
 app.include_router(router, prefix="/api/v1")
 
 
-@app.get("/")
-async def root():
-    return {
-        "service": "cogrid-coordinator",
-        "version": "0.1.0",
-        "docs": "/docs",
-        "api": "/api/v1",
-    }
+# ---- 仪表盘静态文件托管（桌面版打包后自动生效）----
+def _mount_dashboard() -> None:
+    """挂载仪表盘静态文件。
+
+    查找顺序：
+    1. PyInstaller 打包目录下的 dashboard/dist
+    2. 项目根目录下的 dashboard/dist
+    3. 都找不到则跳过（开发模式下用 vite dev server）
+    """
+    from pathlib import Path
+
+    from fastapi.staticfiles import StaticFiles
+
+    candidates = []
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys._MEIPASS) / "dashboard" / "dist")
+    candidates.append(Path(__file__).resolve().parent.parent / "dashboard" / "dist")
+    candidates.append(Path.cwd() / "dashboard" / "dist")
+
+    for dist_dir in candidates:
+        index_html = dist_dir / "index.html"
+        if index_html.exists():
+            app.mount(
+                "/",
+                StaticFiles(directory=str(dist_dir), html=True),
+                name="dashboard",
+            )
+            logger.info(f"仪表盘静态文件已挂载: {dist_dir}")
+            return
+
+    # 没有静态文件时提供 JSON 根路由
+    @app.get("/")
+    async def root():
+        return {
+            "service": "cogrid-coordinator",
+            "version": "0.1.0",
+            "docs": "/docs",
+            "api": "/api/v1",
+            "dashboard": "运行 cd dashboard && npm run dev 启动前端开发服务器",
+        }
+
+
+_mount_dashboard()

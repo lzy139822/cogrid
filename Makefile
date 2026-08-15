@@ -1,4 +1,4 @@
-.PHONY: dev test lint install proto clean help docker-build docker-up docker-down docker-test e2e
+.PHONY: dev test lint install proto clean help docker-build docker-up docker-down docker-test e2e desktop desktop-clean
 
 # 默认目标
 help:
@@ -11,6 +11,7 @@ help:
 	@echo "  make docker-up    - 拉起 Docker 容器"
 	@echo "  make docker-down  - 停止 Docker 容器"
 	@echo "  make docker-test  - Docker 环境完整测试"
+	@echo "  make desktop      - 构建 Windows 桌面 exe"
 	@echo "  make lint         - 代码检查"
 	@echo "  make proto        - 生成 gRPC 代码"
 	@echo "  make clean        - 清理构建产物"
@@ -72,6 +73,24 @@ docker-test:
 	@echo "6. 查看日志..."
 	docker-compose logs --tail=20 coordinator
 	@echo ">>> 测试完成。访问 http://localhost:3000 查看仪表盘"
+
+# 构建 Windows 桌面 exe
+desktop:
+	@echo ">>> 构建桌面版 exe..."
+	@echo "1. 安装依赖..."
+	pip install pyinstaller pystray pillow --break-system-packages 2>/dev/null || true
+	pip install -e coordinator/ -e agent/ -e cli/ --break-system-packages 2>/dev/null || true
+	@echo "2. 构建仪表盘..."
+	cd dashboard && npm install 2>/dev/null && npm run build 2>/dev/null || echo "跳过仪表盘构建"
+	cd ..
+	@echo "3. PyInstaller 打包..."
+	pyinstaller desktop/cogrid.spec --noconfirm --clean
+	@echo ">>> 完成！输出: dist/cogrid.exe"
+
+# 清理桌面版构建产物
+desktop-clean:
+	rm -rf build/ dist/ *.spec.bak
+	@echo ">>> 桌面版构建产物已清理"
 
 # 代码检查
 lint:
